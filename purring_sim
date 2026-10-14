@@ -1,0 +1,141 @@
+const int TOUCH_PIN = 32;
+const int enA = 13;
+const int in1 = 12;
+const int in2 = 14;
+
+#define PROX_ON   720  // based off calibration, will need to do this before the demo
+#define PROX_OFF  730   
+#define TOUCH_ON  500   
+#define TOUCH_OFF 710   
+
+const unsigned long TAP_MAX_MS       = 300;  
+const unsigned long RELEASE_GRACE_MS = 120;  
+const unsigned long TAP_BUZZ_MS      = 80;  
+const unsigned long SAMPLE_MS        = 10;   
+
+const float ACTIVITY_MIN = 11.0;    // at or below this = calm petting
+const float ACTIVITY_MAX = 20.0;   // at or above this = fast scratching
+const unsigned long SLOW_PERIOD_MS = 120;  
+const unsigned long FAST_PERIOD_MS = 40;  
+
+const float ATTACK  = 0.15;   
+const float RELEASE = 0.03;  
+
+const unsigned long NEAR_ON_MS  = 150;  
+const unsigned long NEAR_OFF_MS = 350;
+const int NEAR_STRENGTH = 100;            
+
+bool touching = false;
+bool purring = false;
+bool handNear = false;
+bool motorIsOn = false;
+unsigned long touchBeganAt = 0;
+unsigned long lastTouchSeen = 0;
+unsigned long buzzUntil = 0;
+unsigned long lastSampleAt = 0;
+unsigned long nextToggleAt = 0;
+int lastValue = 0;
+float activity = 0;
+
+void setup() {
+  pinMode(enA, OUTPUT);
+  pinMode(in1, OUTPUT);
+  pinMode(in2, OUTPUT);
+  digitalWrite(in1, HIGH);   
+  digitalWrite(in2, LOW);
+  motorLevel(0);
+  Serial.begin(115200);
+}
+
+void loop() {
+  unsigned long now = millis();
+
+  if (now - lastSampleAt >= SAMPLE_MS) {
+    lastSampleAt = now;
+    int value = touchRead(TOUCH_PIN);
+    updateTouchState(value, now);
+    updateActivity(value);
+
+    Serial.print(value);
+    Serial.print(",");
+    Serial.println(activity * 10);
+  }
+
+  updateMotor(now);
+}
+
+void updateTouchState(int value, unsigned long now) {
+  if (!touching && value < TOUCH_ON) {
+    touching = true;
+    touchBeganAt = now;
+    lastTouchSeen = now;
+    lastValue = value;  
+    activity = 0;
+  }
+
+  if (touching) {
+    if (value < TOUCH_OFF) {
+      lastTouchSeen = now;
+    } else if (now - lastTouchSeen > RELEASE_GRACE_MS) {
+      unsigned long duration = lastTouchSeen - touchBeganAt;
+      if (!purring && duration < TAP_MAX_MS) {
+        buzzUntil = now + TAP_BUZZ_MS;   
+      }
+      touching = false;
+      purring = false;
+    }
+  }
+
+  if (touching && now - touchBeganAt >= TAP_MAX_MS) {
+    purring = true;
+  }
+
+  // proximity 
+  if (!touching) {
+    if (!handNear && value < PROX_ON) handNear = true;
+    else if (handNear && value > PROX_OFF) handNear = false;
+  }
+}
+
+void updateActivity(int value) {
+  if (!touching) return;
+  float delta = abs(value - lastValue);
+  lastValue = value;
+
+  float rate = (delta > activity) ? ATTACK : RELEASE;
+  activity += rate * (delta - activity);
+}
+
+unsigned long currentPeriod() {
+  float a = constrain(activity, ACTIVITY_MIN, ACTIVITY_MAX);
+  float t = (a - ACTIVITY_MIN) / (ACTIVITY_MAX - ACTIVITY_MIN);  
+  return SLOW_PERIOD_MS - t * (SLOW_PERIOD_MS - FAST_PERIOD_MS);
+}
+
+void updateMotor(unsigned long now) {
+  if (purring) {
+    if (now >= nextToggleAt) {
+      motorIsOn = !motorIsOn;
+      unsigned long period = currentPeriod();
+      unsigned long onTime = period * 6 / 10;   // 60% on, 40% off
+      nextToggleAt = now + (motorIsOn ? onTime : period - onTime);
+      motorLevel(motorIsOn ? 255 : 0);
+    }
+  } else if (now < buzzUntil) {
+    motorLevel(255);
+    motorIsOn = false;
+    nextToggleAt = 0;
+  } else if (handNear && !touching) {
+    motorLevel(NEAR_STRENGTH);
+    motorIsOn = false;
+    nextToggleAt = 0;
+  } else {
+    motorLevel(0);
+    motorIsOn = false;
+    nextToggleAt = 0;
+  }
+}
+
+void motorLevel(int level) {
+  analogWrite(enA, level);
+}
